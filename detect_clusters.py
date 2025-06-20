@@ -121,6 +121,9 @@ def show_rag2(
     img_cmap='bone',
     node_feature=None,
     node_cmap='bwr',
+    node_id=None, # could be 'trackid' or other attribute
+    node_id_color='black',
+    node_id_fontsize=9,
     ax=None,
     dataname='weight',
     hide_zero=False,
@@ -334,6 +337,13 @@ def show_rag2(
           ax.plot(c[1],c[0],'o', color=plt.cm.bwr(np.clip(att/2+0.5,0,1)), markersize=5)
         if (node_feature=='trackid'):
           ax.plot(c[1],c[0],'o', color=labels2rgb(att), markersize=5)
+    if (node_id is not None):
+      for u in rag.nodes:
+        node = rag.nodes[u]
+        c = node['centroid']
+        attr = node[node_id]
+        ax.text(c[1],c[0], str(attr), horizontalalignment='center',
+           verticalalignment='center', color=node_id_color, fontsize = node_id_fontsize)
 
     return lc
 
@@ -558,6 +568,12 @@ def compute_clusters(rag, min_cluster_size=2, edge_filter=EdgeFilterAll()):
 from sklearn.metrics.pairwise import pairwise_distances
 
 def trackidFromDPTrack(rag2, df1, thresh = 3.0, next_id=None):
+  '''
+  Assign node['trackid'] to each node of rag2, using the trackid column from DataFrame df1
+  Using closest centroids heuristics
+  Return updated next_id
+  '''
+
   # 1. Compute centroid distances
   df1 = df1.copy().rename(columns={'X (px)':'cx','Y (px)':'cy'})
   df1.loc[-1] = dict(trackid=0, frame=1, cx=0, cy=0)
