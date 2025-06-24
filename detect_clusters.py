@@ -109,6 +109,102 @@ def to_pandas_nodelist(rag):
   return pd.DataFrame([i[1] for i in rag.nodes(data=True)], index=[i[0] for i in rag.nodes(data=True)])
 
 
+# Custom display spots dataframe
+
+
+def show_label_df(
+    labels, # label image
+    df,
+    frame = None, # Select which frame to display from labels and df
+    border_color='black',
+    edge_width=1.5,
+    edge_cmap='magma',
+    img_cmap='bone',
+    node_feature=None,
+    node_cmap='bwr',
+    label_map=None,
+    marker=None,
+    markercolor='red',
+    markersize=None,
+    markerdict=dict(markerfacecolor='none'),
+    node_id=None, # could be 'trackid' or other attribute
+    node_id_color='black',
+    node_id_fontsize=9,
+    ax=None,
+    dataname='weight',
+    hide_zero=False,
+    ignore_node=None,
+):
+    """Show a dataframe of centroids on top of label image
+    See show_rag2 for most options
+    """
+    from matplotlib import colors
+    from matplotlib import pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    # Select frame
+    if (frame is not None):
+      if (labels is not None):
+        labels = labels[frame] # select from image stack
+      df = df[df.frame==frame]
+    # else assume labels and df are for one frame only
+
+    # Background image
+    if (labels is not None):
+      if (label_map is None):
+        out = labels2rgb( labels )
+      else:
+        
+        map = {}
+        for _,item in df.iterrows():
+          if (np.isnan(item.label)): continue
+          if (np.isnan(item[label_map])):
+            map[int(item.label)] = 0
+          else:
+            map[int(item.label)] = int(item[label_map])
+        map[0] = 0  # Background maps to 0
+        
+        def map_func(x):
+          return map.get(x, -1)  # -1 if not in mapping
+
+        # Apply
+        mapped_labels = np.vectorize(map_func)(labels)
+
+        out = labels2rgb( mapped_labels )
+
+      cc = colors.ColorConverter()
+      if border_color is not None:
+          border_color = cc.to_rgb(border_color)
+          out = segmentation.mark_boundaries(out, labels, color=border_color)
+
+      ax.imshow(out)
+
+    # Overlay
+    if (marker is not None):
+      if (markercolor is not None):
+        markerdict['markeredgecolor'] = markercolor
+      if (markersize is not None):
+        markerdict['markersize'] = markersize
+      ax.plot( df.cx, df.cy, linestyle='none', marker=marker, **markerdict )
+
+    if (node_id is not None):
+      for _, item in df.iterrows():
+        c = ( item.cy, item.cx )
+        attr = item[node_id]
+        if (attr is None):
+            continue
+        if (node_id=='label'):
+          attr=int(attr)
+        ax.text(c[1],c[0], str(attr), horizontalalignment='center',
+           verticalalignment='center', color=node_id_color, fontsize = node_id_fontsize,
+           clip_on=True)
+
+    return ax
+
+
 # Custom display RAG function
 
 def show_rag2(
@@ -343,7 +439,8 @@ def show_rag2(
         c = node['centroid']
         attr = node[node_id]
         ax.text(c[1],c[0], str(attr), horizontalalignment='center',
-           verticalalignment='center', color=node_id_color, fontsize = node_id_fontsize)
+           verticalalignment='center', color=node_id_color, fontsize = node_id_fontsize,
+           clip_on=True)
 
     return lc
 
@@ -566,6 +663,218 @@ def compute_clusters(rag, min_cluster_size=2, edge_filter=EdgeFilterAll()):
 ## TRACKING
 
 from sklearn.metrics.pairwise import pairwise_distances
+from skimage.measure import regionprops_table
+
+from PIL import Image
+
+def load_multiframe_tiff(filepath):
+    """
+    Loads a multi-frame TIFF image and returns a list of PIL Image objects, 
+    one for each frame.
+    """
+    frames = []
+    try:
+        img = Image.open(filepath)
+        i = 0
+        while True:
+            try:
+                img.seek(i)
+                frames.append(img.copy())  # Append a copy of the current frame
+                i += 1
+            except EOFError:
+                # End of frames reached
+                break
+    except FileNotFoundError:
+        print(f"Error: File not found at {filepath}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    return frames
+
+def load_multiframe_labels(filepath, dtype=np.uint16):
+  imgs = load_multiframe_tiff(filepath)
+
+  L_array = [ np.array(imgk, dtype=dtype) for imgk in imgs ]
+
+  LL = np.stack(L_array, axis = 0)
+
+  return LL
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Define a dummy tqdm that just returns the iterable unchanged
+    def tqdm(iterable=None, *args, **kwargs):
+        return iterable
+
+def swap_columns(df, col1, col2):
+    col_list = list(df.columns)
+    x, y = col_list.index(col1), col_list.index(col2)
+    col_list[y], col_list[x] = col_list[x], col_list[y]
+    df = df[col_list]
+    return df
+
+def compute_labelimages_df(LL):
+  '''
+  Extract region props for label image stack of shape (nframes, height, width)
+  '''
+  label_df_array = []
+
+  for frame in tqdm( range(len(LL)) ):
+    #print(f'Processing frame {frame}')
+
+    # df2 for Image label data
+    L = LL[frame]
+    df2 = regionprops_table(L, properties=['label','centroid','area','orientation'])
+    df2 = pd.DataFrame(df2)
+    df2 = df2[df2['label'] != 0].reset_index(drop=True)  # Drop background
+
+    df2 = df2.rename(columns={'centroid-0':'cy','centroid-1':'cx'})
+    df2 = swap_columns(df2, 'cx','cy') # Naturalk order
+    df2['frame'] = frame
+
+    label_df_array.append(df2)
+
+  label_df = pd.concat(label_df_array, ignore_index=True)
+
+  return label_df
+
+def compute_distance(df, center):
+  C = df[['cx','cy']].to_numpy()  # Centroids TrackMate
+
+  if (isinstance(center, pd.Series)):
+    cx = center['cx']
+    cy = center['cy']
+  else:
+    cx = center[0]
+    cy = center[1]
+  
+  D = pairwise_distances(C, [[cx,cy]], 'euclidean')
+
+  return pd.Series( data = D.ravel(), index=df.index )
+  
+
+
+def optimal_match(cost, thresh=None):
+  n_rows, n_cols = cost.shape
+  dim = n_rows + n_cols
+
+  if (thresh is not None):
+    fillv = thresh
+  else:
+    fillv = cost.max()+1.0
+
+  padded_cost = np.full((dim, dim), fill_value=fillv)
+  padded_cost[:n_rows, :n_cols] = cost
+
+  # Solve the assignment problem
+  row_ind, col_ind = linear_sum_assignment(padded_cost)
+
+  # Filter out the dummy assignments (those assigned to padded entries)
+  if (thresh is None):
+    assignments = [
+        (r, c) for r, c in zip(row_ind, col_ind)
+        if r < n_rows and c < n_cols
+    ]
+  else:
+    assignments = [
+        (r, c) for r, c in zip(row_ind, col_ind)
+        if r < n_rows and c < n_cols
+    ]
+    assignments = [ (r,c,cost[r,c]) for (r,c) in assignments if cost[r,c]<=thresh ]
+    
+  return assignments
+
+
+def optimal_match_df(df1,df2, thresh=None):
+  C1 = df1[['cx','cy']].to_numpy()  # Centroids TrackMate
+  C2 = df2[['cx','cy']].to_numpy()  # Centroids LabelImage
+
+  D = pairwise_distances(C1, C2, 'euclidean')
+    
+  return optimal_match(D, thresh)
+
+
+def match_df_to_labeldf(df_label, df_trackmate, thresh = 3.0, next_id=None):
+  '''
+  TrackMate does not keep the label image ID for its Spot by default.
+  Hack to connect the two.
+  Assign node['trackid'] to each node of rag2, using the trackid column from DataFrame df1
+  Using closest centroids heuristics
+  Return updated next_id
+  '''
+
+  df_label = df_label.copy()
+  df_trackmate = df_trackmate.copy()
+
+  frames = df_label.frame.sort_values().unique()
+
+  for frame in tqdm(frames):
+    #print(f'Processing frame {frame}')
+
+    # df1 for TrackMate data
+    df1 = df_trackmate[df_trackmate.frame==frame].copy()  #.rename(columns={'X (px)':'cx','Y (px)':'cy'})
+
+    df2 = df_label[df_label.frame==frame].copy()
+
+    # 2. Find matches
+    assignments = optimal_match_df(df1, df2, thresh)
+    valid_rows, valid_cols, valid_d = zip(*assignments)
+    valid_rows = np.array(valid_rows)
+    valid_cols = np.array(valid_cols)
+    valid_d = np.array(valid_d)
+
+    nm = valid_cols.size
+
+    df_label.loc[df2.index[valid_cols], 'match_loc1'] = df1.index[valid_rows]
+    df_label.loc[df2.index[valid_cols], 'trackid'] = df1.loc[ df1.index[valid_rows], 'trackid' ].values # Need values to assign by position
+    df_label.loc[df2.index[valid_cols], 'spotid'] = df1.loc[ df1.index[valid_rows], 'spotid' ].values  # Need values to assign by position
+    df_label.loc[df2.index[valid_cols], 'match_d'] = valid_d
+
+    # Can write back directly to df using shared index with df1
+    df_trackmate.loc[df1.index[valid_rows], 'match_loc2'] = df2.index[valid_cols]
+    df_trackmate.loc[df1.index[valid_rows], 'label'] = df2.loc[ df2.index[valid_cols], 'label' ].values # Need values to assign by position
+    df_trackmate.loc[df1.index[valid_rows], 'match_d'] = valid_d
+
+  print(f'Matched label: {df_label[~df_label.match_d.isna()].shape[0]}')
+  print(f'Matched trackmate: {df_trackmate[~df_trackmate.match_d.isna()].shape[0]}  (should be equal to previous)')
+  print(f'Unmatched label: {df_label[df_label.match_d.isna()].shape[0]}')
+  print(f'Unmatched trackmate: {df_trackmate[df_trackmate.match_d.isna()].shape[0]}')
+
+  return df_trackmate, df_label
+
+
+def find_near_duplicates(df, thresh=3.0):
+    near_duplicates_indices = set()
+
+    frames = df.frame.sort_values().unique()
+
+    #df.loc[locj,'hasnearduplicate'] = False
+    
+    for frame in tqdm(frames):
+        #print(f'Processing frame {frame}')
+
+        # df1 for TrackMate data
+        dff = df[df.frame==frame] # df for frame
+
+        C = dff[['cx','cy']].to_numpy()  # Centroids TrackMate
+        D = pairwise_distances(C, C, 'euclidean')
+
+        
+        for i in range(len(dff)):
+            loci = dff.index[i]
+            for j in range(i + 1, len(dff)):
+                locj = dff.index[j]
+                if D[i,j] <= thresh:
+                    near_duplicates_indices.add(i)
+                    near_duplicates_indices.add(j)
+                    #near_duplicates_pairs.add( (i,j) )
+                    #df.loc[loci,'hasnearduplicate'] = True
+                    #df.loc[locj,'hasnearduplicate'] = True
+
+    near_duplicates_df = df.iloc[list(near_duplicates_indices)]
+    
+    return near_duplicates_df
+
 
 def trackidFromDPTrack(rag2, df1, thresh = 3.0, next_id=None):
   '''
