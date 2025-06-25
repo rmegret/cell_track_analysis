@@ -58,7 +58,11 @@ def labels2rgb(L, rgbmap=None, seed=0, hsv=False):
       rgbmap = rs.rand( L.max()+2, 3 )
     rgbmap[0,:] = 0
     rgbmap[-1,:] = 1
-  return rgbmap[L,:]
+
+    rgb = rgbmap[L,:]
+    rgb[np.isnan(L),:] = [1,0.9,0.9]
+
+  return rgb
 
 def plot_cell_axis(L,rd=5):
   #rd=5
@@ -115,6 +119,7 @@ def to_pandas_nodelist(rag):
 def show_label_df(
     labels, # label image
     df,
+    rawimage=None,
     frame = None, # Select which frame to display from labels and df
     border_color='black',
     edge_width=1.5,
@@ -149,37 +154,46 @@ def show_label_df(
     if (frame is not None):
       if (labels is not None):
         labels = labels[frame] # select from image stack
+      if (rawimage is not None):
+        rawimage = rawimage[frame] # select from image stack
       df = df[df.frame==frame]
     # else assume labels and df are for one frame only
 
     # Background image
-    if (labels is not None):
-      if (label_map is None):
-        out = labels2rgb( labels )
-      else:
-        
-        map = {}
-        for _,item in df.iterrows():
-          if (np.isnan(item.label)): continue
-          if (np.isnan(item[label_map])):
-            map[int(item.label)] = 0
-          else:
-            map[int(item.label)] = int(item[label_map])
-        map[0] = 0  # Background maps to 0
-        
-        def map_func(x):
-          return map.get(x, -1)  # -1 if not in mapping
+    out = None
+    if (rawimage is not None):
+      out = rawimage
+      if (len(out.shape)==2):
+        out = np.stack([out,out,out],axis=2)
+    else:
+      if (labels is not None):
+        if (label_map is None):
+          out = labels2rgb( labels )
+        else:
+          map = {}
+          for _,item in df.iterrows():
+            if (np.isnan(item.label)):  # label nan
+              map[item.label] = -1
+            elif (np.isnan(item[label_map])):  # trackid nan
+              map[int(item.label)] = -1
+            else:
+              map[int(item.label)] = int(item[label_map])
+          map[0] = 0  # Background maps to 0
+          
+          def map_func(x):
+            return map.get(x, -1)  # -1 if not in mapping
 
-        # Apply
-        mapped_labels = np.vectorize(map_func)(labels)
+          # Apply
+          mapped_labels = np.vectorize(map_func)(labels)
 
-        out = labels2rgb( mapped_labels )
+          out = labels2rgb( mapped_labels )
 
+    if (border_color is not None) and (labels is not None):
       cc = colors.ColorConverter()
-      if border_color is not None:
-          border_color = cc.to_rgb(border_color)
-          out = segmentation.mark_boundaries(out, labels, color=border_color)
+      border_color = cc.to_rgb(border_color)
+      out = segmentation.mark_boundaries(out, labels, color=border_color)
 
+    if (out is not None):
       ax.imshow(out)
 
     # Overlay
@@ -195,8 +209,10 @@ def show_label_df(
         c = ( item.cy, item.cx )
         attr = item[node_id]
         if (attr is None):
-            continue
-        if (node_id=='label'):
+          attr = '?'
+        elif (np.isnan(attr)):
+          attr = '!'
+        else:
           attr=int(attr)
         ax.text(c[1],c[0], str(attr), horizontalalignment='center',
            verticalalignment='center', color=node_id_color, fontsize = node_id_fontsize,
@@ -1247,3 +1263,11 @@ def loadDPTracks(filename):
   df.sort_values('Frame')
   df = df.rename(columns={'Particle ID': 'trackid','Frame':'frame','X (px)':'cx','Y (px)':'cy'})
   return df
+
+def compute_frame_diff_column(df):
+  ddf = df.sort_values(['trackid', 'frame']).reset_index()
+  # Group by track_id and compute the difference in frame number
+  ddf['frame_diff'] = ddf.groupby('trackid')['frame'].diff()
+  ddf.index=ddf['index']
+  df['frame_diff'] = ddf['frame_diff']
+  return ddf
